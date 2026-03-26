@@ -1,0 +1,217 @@
+trigger: none
+
+variables:
+  TF_WORKING_DIR:        '$(System.DefaultWorkingDirectory)/nexus-infra/environment/prod' #exus-infra
+  TF_STATE_RG:           '$(TF_STATE_RG)'
+  TF_STATE_SA:           '$(TF_STATE_SA)'
+  TF_STATE_CONTAINER:    '$(TF_STATE_CONTAINER)'
+  TF_STATE_KEY:          '$(TF_STATE_KEY)'
+  TF_SUBSCRIPTION_ID:    '$(AZ_SUBSCRIPTION_ID)'
+  TF_TENANT_ID:          '$(AZ_TENANT_ID)'
+  tf_install_version:     '1.14.3'
+  TF_STATE_LOCATION:      'South Central US'
+  TF_OUTPLAN:             'output'
+  TF_SERVICE_CONNECTION:  'ceco-tf-prod-nexus-spn'
+
+pool:
+  name: Pipeline_Agent
+  demands: agent.os -equals Linux
+
+stages:
+- stage: ValidateAndPlan
+  displayName: Terraform Validate & Plan
+  condition: succeeded()
+  variables:
+    - group: "ceco-tf-prod-nexus"
+  jobs:
+  - job: validateplan
+    displayName: Validate and Plan
+    steps:
+
+    - task: AzureCLI@2
+      displayName: "az login"
+      inputs:
+        azureSubscription: $(TF_SERVICE_CONNECTION)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: 'az account show'
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@1
+      inputs:
+        terraformVersion: '$(tf_install_version)'
+
+    - task: TerraformTask@5
+      displayName: "tf init"
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/nexus-infra/environment/prod'  #'$(TF_WORKING_DIR)'
+        commandOptions: '-reconfigure'
+        backendServiceArm: '$(TF_SERVICE_CONNECTION)'
+        backendAzureRmResourceGroupName: '$(TF_STATE_RG)'
+        backendAzureRmStorageAccountName: '$(TF_STATE_SA)'
+        backendAzureRmContainerName: '$(TF_STATE_CONTAINER)'
+        backendAzureRmKey: '$(TF_STATE_KEY)'
+
+    - task: TerraformTask@5
+      displayName: "Validate the tf codes"
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: '$(TF_WORKING_DIR)'
+
+    # - task: Bash@3
+    #   displayName: 'Checkov IaC Scan'
+    #   continueOnError: true
+    #   inputs:
+    #     targetType: 'inline'
+    #     script: |
+    #       pip install checkov
+    #       checkov -d $(TF_WORKING_DIR) --framework terraform
+    #     workingDirectory: '$(TF_WORKING_DIR)'
+        
+    - task: TerraformTask@5
+      displayName: "tf plan and output plan"
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: '$(TF_WORKING_DIR)'
+        commandOptions: '-out=tfplan -var-file=$(TF_WORKING_DIR)/prod.tfvars'
+        environmentServiceNameAzureRM: 'ceco-tf-prod-nexus-spn'
+
+    - task: TerraformTask@5
+      displayName: 'tf show'
+      inputs:
+        provider: 'azurerm'
+        command: 'show'
+        workingDirectory: '$(TF_WORKING_DIR)'
+        commandOptions: 'tfplan'
+        outputTo: 'console'
+        outputFormat: 'default'
+        environmentServiceNameAzureRM: 'ceco-tf-prod-nexus-spn'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish plan artifact'
+      inputs:
+        PathtoPublish: '$(TF_WORKING_DIR)/tfplan' # $(Build.ArtifactStagingDirectory)/tfplan'
+        ArtifactName: '$(TF_OUTPLAN)'
+        publishLocation: 'Container'
+
+- stage: Apply
+  displayName: Terraform Apply
+  dependsOn: ValidateAndPlan
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: apply
+    displayName: Apply
+    variables:
+      - group: "ceco-tf-prod-nexus"
+    steps:
+    - task: AzureCLI@2
+      displayName: "az login"
+      inputs:
+        azureSubscription: $(TF_SERVICE_CONNECTION)
+        scriptType: 'pscore'
+        scriptLocation: 'inlineScript'
+        inlineScript: 'az account show'
+
+    - task:  ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+      displayName: 'Install tf $(tf_install_version) '
+      inputs:
+        terraformVersion: '$(tf_install_version)'
+
+    - task: DownloadBuildArtifacts@1
+      displayName: 'download outplan file'
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: '$(TF_OUTPLAN)'
+        downloadPath: '$(Pipeline.Workspace)/plan'
+
+    - task: TerraformTask@5
+      displayName: "tf init"
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(TF_WORKING_DIR)'
+        commandOptions: '-reconfigure'
+        backendServiceArm: '$(TF_SERVICE_CONNECTION)'
+        backendAzureRmOverrideSubscriptionID: '$(TF_SUBSCRIPTION_ID)'
+        backendAzureRmResourceGroupName: '$(TF_STATE_RG)'
+        backendAzureRmStorageAccountName: '$(TF_STATE_SA)'
+        backendAzureRmContainerName: '$(TF_STATE_CONTAINER)'
+        backendAzureRmKey: '$(TF_STATE_KEY)'
+
+    - task: TerraformTask@5
+      displayName: 'Terraform apply (auto-approve)'
+      inputs:
+        provider: 'azurerm'
+        command: 'apply'
+        workingDirectory: '$(TF_WORKING_DIR)'
+        commandOptions: '-auto-approve $(Pipeline.Workspace)/plan/$(TF_OUTPLAN)/tfplan'
+        environmentServiceNameAzureRM: $(TF_SERVICE_CONNECTION)
+        environmentAzureRmOverrideSubscriptionID: '$(TF_SUBSCRIPTION_ID)'
+
+        # commandOptions: >
+        #   -auto-approve
+        #   -var "subscription_id=$(TF_SUBSCRIPTION_ID)"
+        #   -var "tenant_id=$(TF_TENANT_ID)"
+        #   -var-file "$(TF_WORKING_DIR)/env.tfvars"
+
+
+- stage: Destroy
+  displayName: Terraform Apply Destroy
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+  jobs:
+  - job: destroy
+    displayName: destroy
+    variables:
+      - group: "ceco-tf-prod-nexus"
+    steps:
+    - task: AzureCLI@2
+      displayName: "az login"
+      inputs:
+        azureSubscription: $(TF_SERVICE_CONNECTION)
+        scriptType: 'pscore'
+        scriptLocation: 'inlineScript'
+        inlineScript: 'az account show'
+
+    - task:  ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+      displayName: 'Install tf $(tf_install_version) '
+      inputs:
+        terraformVersion: '$(tf_install_version)'
+
+    - task: TerraformTask@5
+      displayName: "tf init"
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(TF_WORKING_DIR)'
+        commandOptions: '-reconfigure'
+        backendServiceArm: '$(TF_SERVICE_CONNECTION)'
+        backendAzureRmOverrideSubscriptionID: '$(TF_SUBCRIPTION_ID)'
+        backendAzureRmResourceGroupName: '$(TF_STATE_RG)'
+        backendAzureRmStorageAccountName: '$(TF_STATE_SA)'
+        backendAzureRmContainerName: '$(TF_STATE_CONTAINER)'
+        backendAzureRmKey: '$(TF_STATE_KEY)'
+        
+    - task: TerraformTask@5
+      displayName: "tf plan to destroy"
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: '$(TF_WORKING_DIR)'
+        commandOptions: '-destroy -out=tfdestroy.plan -var-file=$(TF_WORKING_DIR)/prod.tfvars'
+        environmentServiceNameAzureRM: $(TF_SERVICE_CONNECTION)
+
+    - task: TerraformTask@5
+      displayName: 'Terraform apply destroy (auto-approve)'
+      inputs:
+        provider: 'azurerm'
+        command: 'apply'
+        workingDirectory: '$(TF_WORKING_DIR)'
+        commandOptions: '-auto-approve $(TF_WORKING_DIR)/tfdestroy.plan'
+        environmentServiceNameAzureRM: $(TF_SERVICE_CONNECTION)
+
+
+
