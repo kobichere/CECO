@@ -1,7 +1,7 @@
-trigger: none
+trigger: none #will be updated
 
 variables:
-  TF_WORKING_DIR:        '$(System.DefaultWorkingDirectory)/nexus-infra/environment/prod' #exus-infra
+  TF_WORKING_DIR:        '$(System.DefaultWorkingDirectory)/nexus-infra/environment/prod'
   TF_STATE_RG:           '$(TF_STATE_RG)'
   TF_STATE_SA:           '$(TF_STATE_SA)'
   TF_STATE_CONTAINER:    '$(TF_STATE_CONTAINER)'
@@ -45,7 +45,7 @@ stages:
       inputs:
         provider: 'azurerm'
         command: 'init'
-        workingDirectory: '$(System.DefaultWorkingDirectory)/nexus-infra/environment/prod'  #'$(TF_WORKING_DIR)'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/nexus-infra/environment/prod'
         commandOptions: '-reconfigure'
         backendServiceArm: '$(TF_SERVICE_CONNECTION)'
         backendAzureRmResourceGroupName: '$(TF_STATE_RG)'
@@ -59,16 +59,6 @@ stages:
         provider: 'azurerm'
         command: 'validate'
         workingDirectory: '$(TF_WORKING_DIR)'
-
-    # - task: Bash@3
-    #   displayName: 'Checkov IaC Scan'
-    #   continueOnError: true
-    #   inputs:
-    #     targetType: 'inline'
-    #     script: |
-    #       pip install checkov
-    #       checkov -d $(TF_WORKING_DIR) --framework terraform
-    #     workingDirectory: '$(TF_WORKING_DIR)'
         
     - task: TerraformTask@5
       displayName: "tf plan and output plan"
@@ -93,7 +83,7 @@ stages:
     - task: PublishBuildArtifacts@1
       displayName: 'Publish plan artifact'
       inputs:
-        PathtoPublish: '$(TF_WORKING_DIR)/tfplan' # $(Build.ArtifactStagingDirectory)/tfplan'
+        PathtoPublish: '$(TF_WORKING_DIR)/tfplan'
         ArtifactName: '$(TF_OUTPLAN)'
         publishLocation: 'Container'
 
@@ -152,13 +142,8 @@ stages:
         environmentServiceNameAzureRM: $(TF_SERVICE_CONNECTION)
         environmentAzureRmOverrideSubscriptionID: '$(TF_SUBSCRIPTION_ID)'
 
-        # commandOptions: >
-        #   -auto-approve
-        #   -var "subscription_id=$(TF_SUBSCRIPTION_ID)"
-        #   -var "tenant_id=$(TF_TENANT_ID)"
-        #   -var-file "$(TF_WORKING_DIR)/env.tfvars"
 
-
+# Terraform Destroy stage, only triggered when the source branch is develop, to avoid accidental destroy in prod environment.
 - stage: Destroy
   displayName: Terraform Apply Destroy
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
